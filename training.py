@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 from tqdm import tqdm # for displaying progress bar
 import os
@@ -100,6 +101,15 @@ class Trainer:
 				if idx % print_interval == 0:
 					print("intent loss: " + str(intent_loss.cpu().data.numpy().item()))
 					print("intent acc: " + str(intent_acc.cpu().data.numpy().item()))
+					if self.model.seq2seq:
+						self.model.cpu(); self.model.is_cuda = False
+						x = x.cpu(); y_intent = y_intent.cpu()
+						print("seq2seq output")
+						self.model.eval()
+						print("guess: " + self.model.decode_intents(x)[0])
+						print("truth: " + self.model.one_hot_to_string(y_intent[0],self.model.Sy_intent))
+						self.model.train()
+						self.model.cuda(); self.model.is_cuda = True
 			train_intent_loss /= num_examples
 			train_intent_acc /= num_examples
 			self.model.unfreeze_one_layer()
@@ -137,6 +147,7 @@ class Trainer:
 			test_intent_loss = 0
 			num_examples = 0
 			self.model.eval()
+			self.model.cpu(); self.model.is_cuda = False # beam search is memory-intensive; do on CPU for now
 			for idx, batch in enumerate(dataset.loader):
 				x,y_intent = batch
 				batch_size = len(x)
@@ -144,6 +155,15 @@ class Trainer:
 				intent_loss, intent_acc = self.model(x,y_intent)
 				test_intent_loss += intent_loss.cpu().data.numpy().item() * batch_size
 				test_intent_acc += intent_acc.cpu().data.numpy().item() * batch_size
+				if self.model.seq2seq and self.epoch > 1:
+					print("decoding batch %d" % idx)
+					guess_strings = np.array(self.model.decode_intents(x))
+					truth_strings = np.array([self.model.one_hot_to_string(y_intent[i],self.model.Sy_intent) for i in range(batch_size)])
+					test_intent_acc += (guess_strings == truth_strings).mean() * batch_size
+					print("acc: " + str((guess_strings == truth_strings).mean()))
+					print("guess: " + guess_strings[0])
+					print("truth: " + truth_strings[0])
+			self.model.cuda(); self.model.is_cuda = True
 			test_intent_loss /= num_examples
 			test_intent_acc /= num_examples
 			results = {"intent_loss" : test_intent_loss, "intent_acc" : test_intent_acc, "set": "valid"}

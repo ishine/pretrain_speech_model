@@ -1,5 +1,6 @@
 import torch
 import torch.utils.data
+import torchaudio
 import os, glob
 from collections import Counter
 import soundfile as sf
@@ -62,6 +63,15 @@ def read_config(config_file):
 	config.intent_downsample_type=[x for x in parser.get("intent_module", "intent_downsample_type").split(",")]
 	config.intent_rnn_drop=[float(x) for x in parser.get("intent_module", "intent_rnn_drop").split(",")]
 	config.intent_rnn_bidirectional=(parser.get("intent_module", "intent_rnn_bidirectional") == "True")
+	try:
+		config.intent_encoder_dim=int(parser.get("intent_module", "intent_encoder_dim"))
+		config.num_intent_encoder_layers=int(parser.get("intent_module", "num_intent_encoder_layers"))
+		config.intent_decoder_dim=int(parser.get("intent_module", "intent_decoder_dim"))
+		config.num_intent_decoder_layers=int(parser.get("intent_module", "num_intent_decoder_layers"))
+		config.intent_decoder_key_dim=int(parser.get("intent_module", "intent_decoder_key_dim"))
+		config.intent_decoder_value_dim=int(parser.get("intent_module", "intent_decoder_value_dim"))
+	except:
+		print("no seq2seq hyperparameters")
 
 	#[pretraining]
 	config.asr_path=parser.get("pretraining", "asr_path")
@@ -82,11 +92,31 @@ def read_config(config_file):
 	config.training_lr=float(parser.get("training", "training_lr"))
 	config.training_batch_size=int(parser.get("training", "training_batch_size"))
 	config.training_num_epochs=int(parser.get("training", "training_num_epochs"))
-	config.dataset_subset_percentage=float(parser.get("training", "dataset_subset_percentage"))
+	config.real_dataset_subset_percentage=float(parser.get("training", "real_dataset_subset_percentage"))
+	config.synthetic_dataset_subset_percentage=float(parser.get("training", "synthetic_dataset_subset_percentage"))
+	config.real_speaker_subset_percentage=float(parser.get("training", "real_speaker_subset_percentage"))
+	config.synthetic_speaker_subset_percentage=float(parser.get("training", "synthetic_speaker_subset_percentage"))
 	config.train_wording_path=parser.get("training", "train_wording_path")
 	if config.train_wording_path=="None": config.train_wording_path = None
 	config.test_wording_path=parser.get("training", "test_wording_path")
 	if config.test_wording_path=="None": config.test_wording_path = None
+	try:
+		config.augment = (parser.get("training", "augment")  == "True")
+	except:
+		# old config file with no augmentation
+		config.augment = False
+
+	try:
+		config.seq2seq = (parser.get("training", "seq2seq")  == "True")
+	except:
+		# old config file with no seq2seq
+		config.seq2seq = False
+
+	try:
+		config.dataset_upsample_factor = int(parser.get("training", "dataset_upsample_factor"))
+	except:
+		# old config file
+		config.dataset_upsample_factor = 1
 
 	# compute downsample factor (divide T by this number)
 	config.phone_downsample_factor = 1
@@ -106,21 +136,76 @@ def get_SLU_datasets(config):
 	base_path = config.slu_path
 
 	# Split
-	train_df = pd.read_csv(os.path.join(base_path, "data", "train_data.csv"))
-	valid_df = pd.read_csv(os.path.join(base_path, "data", "valid_data.csv"))
-	test_df = pd.read_csv(os.path.join(base_path, "data", "test_data.csv"))
-	
-	# Get list of slots
-	Sy_intent = {"action": {}, "object": {}, "location": {}}
+	if not config.seq2seq:
+		synthetic_train_df = pd.read_csv(os.path.join(base_path, "data", "synthetic_data.csv"))
+		real_train_df = pd.read_csv(os.path.join(base_path, "data", "train_data.csv"))
+		if "\"Unnamed: 0\"" in list(real_train_df): real_train_df = real_train_df.drop(columns="Unnamed: 0")
+	else:
+		synthetic_train_df = pd.read_csv(os.path.join(base_path, "data", "synthetic_data_seq2seq.csv"))
+		real_train_df = pd.read_csv(os.path.join(base_path, "data", "train_data_seq2seq.csv"))
+		if "\"Unnamed: 0\"" in list(real_train_df): real_train_df = real_train_df.drop(columns="Unnamed: 0")
 
-	values_per_slot = []
-	for slot in ["action", "object", "location"]:
-		slot_values = Counter(train_df[slot])
-		for idx,value in enumerate(slot_values):
-			Sy_intent[slot][value] = idx
-		values_per_slot.append(len(slot_values))
-	config.values_per_slot = values_per_slot
-	config.Sy_intent = Sy_intent
+	# Select random subset of speakers
+	# First, check if "speakerId" is in the df columns
+	if "speakerId" in list(real_train_df) and "speakerId" in list(synthetic_train_df):
+		if config.real_speaker_subset_percentage < 1:
+			speakers = np.array(list(Counter(real_train_df.speakerId)))
+			np.random.shuffle(speakers)
+			selected_speaker_count = round(config.real_speaker_subset_percentage * len(speakers))
+			selected_speakers = speakers[:selected_speaker_count]
+			real_train_df = real_train_df[real_train_df["speakerId"].isin(selected_speakers)]
+		if config.synthetic_speaker_subset_percentage < 1:
+			speakers = np.array(list(Counter(synthetic_train_df.speakerId)))
+			np.random.shuffle(speakers)
+			selected_speaker_count = round(config.synthetic_speaker_subset_percentage * len(speakers))
+			selected_speakers = speakers[:selected_speaker_count]
+			synthetic_train_df = synthetic_train_df[synthetic_train_df["speakerId"].isin(selected_speakers)]
+	else:
+		if "speakerId" in list(real_train_df): real_train_df = real_train_df.drop(columns="speakerId")
+		if "speakerId" in list(synthetic_train_df): synthetic_train_df = synthetic_train_df.drop(columns="speakerId")
+		if config.real_speaker_subset_percentage < 1:
+			print("no speaker id listed in dataset .csv; ignoring speaker subset selection")
+		if config.synthetic_speaker_subset_percentage < 1:
+			print("no speaker id listed in dataset .csv; ignoring speaker subset selection")
+
+	# Select random subset of training data
+	if config.real_dataset_subset_percentage < 1:
+		subset_size = round(config.real_dataset_subset_percentage * len(real_train_df))
+		real_train_df = real_train_df.loc[np.random.choice(len(real_train_df), subset_size, replace=False)]
+		#real_train_df = real_train_df.set_index(np.arange(len(real_train_df)))
+	if config.synthetic_dataset_subset_percentage < 1:
+		subset_size = round(config.synthetic_dataset_subset_percentage * len(synthetic_train_df))
+		synthetic_train_df = synthetic_train_df.loc[np.random.choice(len(synthetic_train_df), subset_size, replace=False)]
+		#synthetic_train_df = synthetic_train_df.set_index(np.arange(len(synthetic_train_df)))
+
+	train_df = pd.concat([synthetic_train_df, real_train_df]).reset_index()
+	if not config.seq2seq:
+		valid_df = pd.read_csv(os.path.join(base_path, "data", "valid_data.csv"))
+		test_df = pd.read_csv(os.path.join(base_path, "data", "test_data.csv"))
+	else:
+		valid_df = pd.read_csv(os.path.join(base_path, "data", "valid_data_seq2seq.csv"))
+		test_df = pd.read_csv(os.path.join(base_path, "data", "test_data_seq2seq.csv"))
+
+	if not config.seq2seq:
+		# Get list of slots
+		Sy_intent = {"action": {}, "object": {}, "location": {}}
+
+		values_per_slot = []
+		for slot in ["action", "object", "location"]:
+			slot_values = Counter(train_df[slot])
+			for idx,value in enumerate(slot_values):
+				Sy_intent[slot][value] = idx
+			values_per_slot.append(len(slot_values))
+		config.values_per_slot = values_per_slot
+		config.Sy_intent = Sy_intent
+	else: #seq2seq
+		import string
+		all_chars = "".join(train_df.loc[i]["semantics"] for i in range(len(train_df))) + string.printable # all printable chars; TODO: unicode?
+		all_chars = list(set(all_chars))
+		Sy_intent = ["<sos>"]
+		Sy_intent += all_chars
+		Sy_intent.append("<eos>")
+		config.Sy_intent = Sy_intent
 
 	# If certain phrases are specified, only use those phrases
 	if config.train_wording_path is not None:
@@ -147,21 +232,19 @@ def get_SLU_datasets(config):
 	else:
 		print("No phoneme file found.")
 
-	# Select random subset of training data
-	if config.dataset_subset_percentage < 1:
-		subset_size = round(config.dataset_subset_percentage * len(train_df))
-		train_df = train_df.loc[np.random.choice(len(train_df), subset_size, replace=False)]
-		train_df = train_df.set_index(np.arange(len(train_df)))
-
 	# Create dataset objects
-	train_dataset = SLUDataset(train_df, base_path, Sy_intent, config)
+	train_dataset = SLUDataset(train_df, base_path, Sy_intent, config,upsample_factor=config.dataset_upsample_factor)
 	valid_dataset = SLUDataset(valid_df, base_path, Sy_intent, config)
 	test_dataset = SLUDataset(test_df, base_path, Sy_intent, config)
 
 	return train_dataset, valid_dataset, test_dataset
 
+# taken from https://github.com/jfsantos/maracas/blob/master/maracas/maracas.py
+def rms_energy(x):
+	return 10*np.log10((1e-12 + x.dot(x))/len(x))
+
 class SLUDataset(torch.utils.data.Dataset):
-	def __init__(self, df, base_path, Sy_intent, config):
+	def __init__(self, df, base_path, Sy_intent, config, upsample_factor=1):
 		"""
 		df:
 		Sy_intent: Dictionary (transcript --> slot values)
@@ -169,33 +252,103 @@ class SLUDataset(torch.utils.data.Dataset):
 		"""
 		self.df = df
 		self.base_path = base_path
-		self.max_length = 200000 # truncate audios longer than this
 		self.Sy_intent = Sy_intent
-		
-		self.loader = torch.utils.data.DataLoader(self, batch_size=config.training_batch_size, num_workers=multiprocessing.cpu_count(), shuffle=True, collate_fn=CollateWavsSLU())
+		self.upsample_factor = upsample_factor
+		self.augment = False #augment
+		self.SNRs = [0,5,10,15,20]
+		self.seq2seq = config.seq2seq
+
+		self.loader = torch.utils.data.DataLoader(self, batch_size=config.training_batch_size, num_workers=multiprocessing.cpu_count(), shuffle=True, collate_fn=CollateWavsSLU(self.Sy_intent, self.seq2seq))
 
 	def __len__(self):
-		return len(self.df)
+		#if self.augment: return len(self.df)*2 # second half of dataset is augmented
+		return len(self.df) * self.upsample_factor
 
 	def __getitem__(self, idx):
+		#augment = ((idx / len(self.df)) > 1) and self.augment
+		#true_idx = idx
+		idx = idx % len(self.df)
+
 		wav_path = os.path.join(self.base_path, self.df.loc[idx].path)
-		x, fs = sf.read(wav_path)
+		effect = torchaudio.sox_effects.SoxEffectsChain()
+		effect.set_input_file(wav_path)
 
-		if len(x) <= self.max_length:
-			start = 0
+		augment = False
+		if augment:
+			# speed/tempo
+			min_speed = 0.9; max_speed = 1.1; speed_range = max_speed-min_speed
+			speed = speed_range * np.random.rand(1)[0] + min_speed
+			effect.append_effect_to_chain("tempo", speed)
+			del speed
+
+			# volume
+			min_gain = -10; max_gain = 10; gain_range = max_gain-min_gain
+			gain_dB = gain_range * np.random.rand(1)[0] + min_gain
+			gain = 10**(gain_dB/20)
+			effect.append_effect_to_chain("vol", gain)
+			del gain_dB
+
+
+		wav, fs = effect.sox_build_flow_effects()
+		x = wav[0].numpy()
+		del wav, effect
+
+		if augment:
+			# crop
+			min_length = round(x.shape[0]*0.9); max_length = round(x.shape[0]*1.1); length_range=max_length-min_length
+			length = int(length_range * np.random.rand(1)[0] + min_length)
+			start = int((x.shape[0]-length)/2)
+			if start < 0:
+				left_padding = -start
+				right_padding = length-(x.shape[0]-start)
+				x = np.pad(x,(left_padding, right_padding),mode="constant")
+			else:
+				start += np.random.randint(low=-start, high=1, size=1)[0]
+				x = x[start:start+length]
+
+			# noise (taken from https://github.com/jfsantos/maracas/blob/master/maracas/maracas.py)
+			snr = np.random.choice(self.SNRs, 1, p=[1/len(self.SNRs) for _ in range(len(self.SNRs))])[0]
+			noise = np.random.randn(len(x))
+			N_dB = rms_energy(noise)
+			S_dB = rms_energy(x)
+			N_new = S_dB - snr
+			noise_scaled = 10**(N_new/20) * noise / 10**(N_dB/20)
+			x = x + noise_scaled
+
+		if not self.seq2seq:
+			y_intent = [] 
+			for slot in ["action", "object", "location"]:
+				value = self.df.loc[idx][slot]
+				y_intent.append(self.Sy_intent[slot][value])
 		else:
-			start = torch.randint(low=0, high=len(x)-self.max_length, size=(1,)).item()
-		end = start + self.max_length
-
-		x = x[start:end]
-		y_intent = [] 
-		for slot in ["action", "object", "location"]:
-			value = self.df.loc[idx][slot]
-			y_intent.append(self.Sy_intent[slot][value])
+			# need sos, eos
+			y_intent = [self.Sy_intent.index("<sos>")]
+			y_intent += [self.Sy_intent.index(c) for c in self.df.loc[idx]["semantics"]]
+			y_intent.append(self.Sy_intent.index("<eos>"))
 
 		return (x, y_intent)
 
+def one_hot(letters, S):
+	"""
+	letters : LongTensor of shape (batch size, sequence length)
+	S : integer
+	Convert batch of integer letter indices to one-hot vectors of dimension S (# of possible letters).
+	"""
+
+	out = torch.zeros(letters.shape[0], letters.shape[1], S)
+	for i in range(0, letters.shape[0]):
+		for t in range(0, letters.shape[1]):
+			out[i, t, letters[i,t]] = 1
+	return out
+
 class CollateWavsSLU:
+	def __init__(self, Sy_intent, seq2seq):
+		self.Sy_intent = Sy_intent
+		self.num_labels = len(self.Sy_intent)
+		self.seq2seq = seq2seq
+		if self.seq2seq:
+			self.EOS = self.Sy_intent.index("<eos>")
+
 	def __call__(self, batch):
 		"""
 		batch: list of tuples (input wav, intent labels)
@@ -211,15 +364,31 @@ class CollateWavsSLU:
 			y_intent.append(torch.tensor(y_intent_).long())
 
 		# pad all sequences to have same length
-		T = max([len(x_) for x_ in x])
-		for index in range(batch_size):
-			x_pad_length = (T - len(x[index]))
-			x[index] = torch.nn.functional.pad(x[index], (0,x_pad_length))
+		if not self.seq2seq:
+			T = max([len(x_) for x_ in x])
+			for index in range(batch_size):
+				x_pad_length = (T - len(x[index]))
+				x[index] = torch.nn.functional.pad(x[index], (0,x_pad_length))
 
-		x = torch.stack(x)
-		y_intent = torch.stack(y_intent)
+			x = torch.stack(x)
+			y_intent = torch.stack(y_intent)
 
-		return (x,y_intent)
+			return (x,y_intent)
+
+		else: # seq2seq
+			T = max([len(x_) for x_ in x])
+			U = max([len(y_intent_) for y_intent_ in y_intent])
+			for index in range(batch_size):
+				x_pad_length = (T - len(x[index]))
+				x[index] = torch.nn.functional.pad(x[index], (0,x_pad_length))
+				y_pad_length = (U - len(y_intent[index]))
+				y_intent[index] = torch.nn.functional.pad(y_intent[index], (0,y_pad_length), value=self.EOS)
+
+			x = torch.stack(x)
+			y_intent = torch.stack(y_intent)
+			y_intent = one_hot(y_intent, self.num_labels)
+
+			return (x,y_intent)
 
 def get_ASR_datasets(config):
 	"""
