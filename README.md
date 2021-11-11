@@ -1,7 +1,9 @@
 # End-to-End Spoken Language Understanding (SLU) in PyTorch
-This repo contains Pytorch code for training end-to-end SLU models used in the papers "[Speech Model Pre-training for End-to-End Spoken Language Understanding](https://arxiv.org/abs/1904.03670)" and "Using Speech Synthesis to Train End-to-End Spoken Language Understanding Models".
+This repo contains PyTorch code for training end-to-end SLU models used in the papers "[Speech Model Pre-training for End-to-End Spoken Language Understanding](https://arxiv.org/abs/1904.03670)" and "[Using Speech Synthesis to Train End-to-End Spoken Language Understanding Models](https://arxiv.org/abs/1910.09463)".
 
 If you have any questions about this code or have problems getting it to work, please send me an email at ```<the email address listed for Loren in the paper>```.
+
+(**Note:** See the SpeechBrain repository for [a simpler recipe for Fluent Speech Commands](https://github.com/speechbrain/speechbrain/tree/develop/recipes/fluent-speech-commands) and other SLU benchmarks.)
 
 ## Dependencies
 PyTorch, torchaudio, numpy, soundfile, pandas, tqdm, textgrid.py
@@ -9,7 +11,7 @@ PyTorch, torchaudio, numpy, soundfile, pandas, tqdm, textgrid.py
 ## Training
 First, change the ```asr_path``` and/or ```slu_path``` in the config file (like ```experiments/no_unfreezing.cfg```, or whichever experiment you want to run) to point to where the LibriSpeech data and/or Fluent Speech Commands data are stored on your computer.
 
-_SLU training:_ To train the model on Fluent Speech Commands, run the following command:
+_SLU training:_ To train the model on an SLU dataset, run the following command:
 ```
 python main.py --train --config_path=<path to .cfg>
 ```
@@ -42,5 +44,5 @@ The ```test.wav``` file included with this repo has a recording of me saying "He
 ## Citation
 If you find this repo or our Fluent Speech Commands dataset useful, please cite our papers:
 
-- Loren Lugosch, Mirco Ravanelli, Patrick Ignoto, Vikrant Singh Tomar, and Yoshua Bengio, "Speech Model Pre-training for End-to-End Spoken Language Understanding", Interspeech, 2019.
-- Loren Lugosch, Brett Meyer, Derek Nowrouzezahrai, and Mirco Ravanelli, "Using Speech Synthesis to Train End-to-End Spoken Language Understanding Models", arXiv, 2019.
+- Loren Lugosch, Mirco Ravanelli, Patrick Ignoto, Vikrant Singh Tomar, and Yoshua Bengio, "Speech Model Pre-training for End-to-End Spoken Language Understanding", Interspeech 2019.
+- Loren Lugosch, Brett Meyer, Derek Nowrouzezahrai, and Mirco Ravanelli, "Using Speech Synthesis to Train End-to-End Spoken Language Understanding Models", ICASSP 2020.
